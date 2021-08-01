@@ -50,6 +50,51 @@ SIZE GetIdealSize(TabsCtrl*);
 void SetPos(TabsCtrl*, RECT&);
 void SetFont(TabsCtrl*, HFONT);
 
+/* TabsCtrl2 */
+
+// TCN_ range is (0u - 550U) => (0U - 580U)
+// only -550u => -554u is used
+constexpr uint T_CLOSING = (0U - 579U);
+constexpr uint T_CLOSE = (0U - 578U);
+constexpr uint T_DRAG = (0U - 577U);
+
+// this is pointed by lparam in WM_NOTIFY notification
+struct TabNotifyInfo {
+    NMHDR nmhdr;
+    int tabIdx1;
+    int tabIdx2;
+};
+
+struct TabsCtrl2;
+
+constexpr COLORREF kDefaultTabBgCol = (COLORREF)-1;
+
+struct TabPainter {
+    TabsCtrl2* tabsCtrl{nullptr};
+    Gdiplus::PathData* data{nullptr};
+    int width{-1};
+    int height{-1};
+    HWND hwnd{nullptr};
+
+    int highlighted{-1};
+    int xClicked{-1};
+    int xHighlighted{-1};
+    int nextTab{-1};
+    bool isDragging{false};
+    bool inTitlebar{false};
+    LPARAM mouseCoordinates{0};
+    COLORREF currBgCol{kDefaultTabBgCol};
+
+    TabPainter(TabsCtrl2* ctrl, Size tabSize);
+    ~TabPainter();
+    bool Reshape(int dx, int dy);
+    int IndexFromPoint(int x, int y, bool* inXbutton = nullptr);
+    void Invalidate(int index);
+    void Paint(HDC hdc, RECT& rc);
+    int Count();
+    int SelectedTabIdx();
+};
+
 struct TabsCtrl2 : WindowBase {
     str::WStr lastTabText;
     bool createToolTipsHwnd{false};
@@ -85,7 +130,7 @@ struct TabsCtrl2 : WindowBase {
     int GetSelectedTabIndex();
     int SetSelectedTabByIndex(int idx);
 
-    void SetItemSize(Size sz);
+    void SetTabSize(Size sz);
     int GetTabCount();
 
     void SetToolTipsHwnd(HWND);

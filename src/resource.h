@@ -10,7 +10,7 @@
 #define IDC_CURSORDRAG                  132
 #define IDD_DIALOG_CHANGE_LANGUAGE      134
 #define IDD_DIALOG_SETTINGS             136
-#define IDD_DIALOG_FIND                 137 
+#define IDD_DIALOG_FIND                 137
 #define IDD_DIALOG_CUSTOM_ZOOM          138
 #define IDD_PROPSHEET_PRINT_ADVANCED    139
 #define IDD_DIALOG_FAV_ADD              140

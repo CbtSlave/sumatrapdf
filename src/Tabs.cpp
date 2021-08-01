@@ -92,13 +92,13 @@ using Gdiplus::Win32Error;
 #define MIN_TAB_WIDTH 100
 
 int GetTabbarHeight(HWND hwnd, float factor) {
-    int dy = DpiScale(hwnd, TABBAR_HEIGHT);
+    int dy = DpiScale(hwnd, kTabBarHeight);
     return (int)(dy * factor);
 }
 
 static inline Size GetTabSize(HWND hwnd) {
-    int dx = DpiScale(hwnd, std::max(gGlobalPrefs->tabWidth, MIN_TAB_WIDTH));
-    int dy = DpiScale(hwnd, TABBAR_HEIGHT);
+    int dx = DpiScale(hwnd, std::max(gGlobalPrefs->tabWidth, kMinTabWidth));
+    int dy = DpiScale(hwnd, kTabBarHeight);
     return Size(dx, dy);
 }
 
@@ -408,8 +408,9 @@ static LRESULT CALLBACK TabBarParentProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             return TabsOnNotify(win, lp);
         }
     }
-
-    return DefSubclassProc(hwnd, msg, wp, lp);
+    delete tab;
+    win->tabsCtrl->RemoveTab(idx);
+    UpdateTabWidth(win);
 }
 
 static LRESULT CALLBACK TabBarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, __unused UINT_PTR uIdSubclass,
@@ -467,21 +468,15 @@ static LRESULT CALLBACK TabBarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, __
             }
             break;
 
-        case TCM_DELETEALLITEMS:
-            tab->selectedTabIdx = -1;
-            tab->highlighted = -1;
-            tab->xClicked = -1;
-            tab->xHighlighted = -1;
-            break;
+    switch (data->code) {
+        case TCN_SELCHANGING:
+            // TODO: Should we allow the switch of the tab if we are in process of printing?
+            SaveCurrentTabInfo(win);
+            return;
 
-        case TCM_SETITEMSIZE:
-            if (tab->Reshape(LOWORD(lp), HIWORD(lp))) {
-                tab->xClicked = -1;
-                if (tab->Count()) {
-                    InvalidateRgn(hwnd, nullptr, FALSE);
-                    UpdateWindow(hwnd);
-                }
-            }
+        case TCN_SELCHANGE:
+            current = win->tabsCtrl->GetSelectedTabIndex();
+            LoadModelIntoTab(win->tabs.at(current));
             break;
 
         case TCM_GETCURSEL:
@@ -636,18 +631,15 @@ static LRESULT CALLBACK TabBarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, __
             if (!wp) {
                 EndPaint(hwnd, &ps);
             }
-            return 0;
-        }
+        } break;
 
-        case WM_SIZE: {
-            WindowInfo* win = FindWindowInfoByHwnd(hwnd);
-            if (win) {
-                UpdateTabWidth(win);
-            }
+        case T_DRAG: {
+            int tab1 = notifyInfo->tabIdx1;
+            int tab2 = notifyInfo->tabIdx2;
+            SwapTabs(win, tab1, tab2);
         } break;
     }
-
-    return DefSubclassProc(hwnd, msg, wp, lp);
+    return;
 }
 
 void CreateTabbar(WindowInfo* win) {
@@ -657,13 +649,16 @@ void CreateTabbar(WindowInfo* win) {
     tabsCtrl->Create();
 
     HWND hwndTabBar = tabsCtrl->hwnd;
-    SetWindowSubclass(hwndTabBar, TabBarProc, 0, (DWORD_PTR)win);
-    SetWindowSubclass(GetParent(hwndTabBar), TabBarParentProc, 0, (DWORD_PTR)win);
+
+    tabsCtrl->onNotify = [win](WmNotifyEvent* ev) {
+        if (!WindowInfoStillValid(win)) {
+            return;
+        }
+        TabsOnNotify(win, ev);
+    };
 
     Size tabSize = GetTabSize(win->hwndFrame);
-    TabPainter* tp = new TabPainter(tabsCtrl, tabSize);
-    SetWindowLongPtr(hwndTabBar, GWLP_USERDATA, (LONG_PTR)tp);
-    tabsCtrl->SetItemSize(tabSize);
+    tabsCtrl->SetTabSize(tabSize);
     win->tabsCtrl = tabsCtrl;
 
     win->tabSelectionHistory = new Vec<TabInfo*>();
@@ -714,13 +709,13 @@ void SaveCurrentTabInfo(WindowInfo* win) {
 }
 
 void UpdateCurrentTabBgColor(WindowInfo* win) {
-    TabPainter* tab = (TabPainter*)GetWindowLongPtr(win->tabsCtrl->hwnd, GWLP_USERDATA);
+    TabPainter* tab = win->tabsCtrl->tabPainter;
     if (win->AsEbook()) {
         COLORREF txtCol;
         GetEbookUiColors(txtCol, tab->currBgCol);
     } else {
         // TODO: match either the toolbar (if shown) or background
-        tab->currBgCol = DEFAULT_CURRENT_BG_COL;
+        tab->currBgCol = kDefaultTabBgCol;
     }
     RepaintNow(win->tabsCtrl->hwnd);
 }
@@ -752,23 +747,11 @@ void TabsOnChangedDoc(WindowInfo* win) {
         return;
     }
 
-    CrashIf(win->tabs.Find(tab) != win->tabsCtrl->GetSelectedTabIndex());
+    int idx = win->tabs.Find(tab);
+    int selectedIdx = win->tabsCtrl->GetSelectedTabIndex();
+    CrashIf(idx != selectedIdx);
     VerifyTabInfo(win, tab);
     SetTabTitle(tab);
-}
-
-static void RemoveTab(WindowInfo* win, int idx) {
-    TabInfo* tab = win->tabs.at(idx);
-    UpdateTabFileDisplayStateForTab(tab);
-    win->tabSelectionHistory->Remove(tab);
-    win->tabs.Remove(tab);
-    if (tab == win->currentTab) {
-        win->ctrl = nullptr;
-        win->currentTab = nullptr;
-    }
-    delete tab;
-    win->tabsCtrl->RemoveTab(idx);
-    UpdateTabWidth(win);
 }
 
 // Called when we're closing a document
@@ -880,7 +863,7 @@ void SetTabsInTitlebar(WindowInfo* win, bool inTitlebar) {
         return;
     }
     win->tabsInTitlebar = inTitlebar;
-    TabPainter* tab = (TabPainter*)GetWindowLongPtr(win->tabsCtrl->hwnd, GWLP_USERDATA);
+    TabPainter* tab = win->tabsCtrl->tabPainter;
     tab->inTitlebar = inTitlebar;
     SetParent(win->tabsCtrl->hwnd, inTitlebar ? win->hwndCaption : win->hwndFrame);
     ShowWindow(win->hwndCaption, inTitlebar ? SW_SHOW : SW_HIDE);
@@ -910,14 +893,17 @@ void TabsSelect(WindowInfo* win, int tabIndex) {
     if (TabsOnNotify(win, (LPARAM)&ntd)) {
         return;
     }
+#endif
     win->currentTab = win->tabs.at(tabIndex);
     auto path = ToUtf8Temp(win->currentTab->filePath);
     logf("TabsSelect: tabIndex: %d, new win->currentTab: 0x%p, path: '%s'\n", tabIndex, win->currentTab, path.Get());
     int prevIdx = win->tabsCtrl->SetSelectedTabByIndex(tabIndex);
+#if 0
     if (prevIdx != -1) {
         ntd.code = (UINT)TCN_SELCHANGE;
         TabsOnNotify(win, (LPARAM)&ntd);
     }
+#endif
 }
 
 // Selects the next (or previous) tab.

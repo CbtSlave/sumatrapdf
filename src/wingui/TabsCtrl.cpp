@@ -5,6 +5,7 @@
 #include "utils/ScopedWin.h"
 #include "utils/Dpi.h"
 #include "utils/WinUtil.h"
+#include "utils/Log.h"
 
 #include "wingui/WinGui.h"
 #include "wingui/Layout.h"
@@ -488,7 +489,273 @@ void SetPos(TabsCtrl* ctrl, RECT& r) {
 
 /* ----- */
 
+using Gdiplus::Color;
+using Gdiplus::CompositingQualityHighQuality;
+using Gdiplus::Font;
+using Gdiplus::Graphics;
+using Gdiplus::GraphicsPath;
+using Gdiplus::PathData;
+using Gdiplus::Pen;
+using Gdiplus::Region;
+using Gdiplus::SolidBrush;
+using Gdiplus::StringAlignmentCenter;
+using Gdiplus::StringFormat;
+using Gdiplus::TextRenderingHintClearTypeGridFit;
+using Gdiplus::UnitPixel;
+
+TabPainter::TabPainter(TabsCtrl2* ctrl, Size tabSize) {
+    tabsCtrl = ctrl;
+    hwnd = tabsCtrl->hwnd;
+    Reshape(tabSize.dx, tabSize.dy);
+}
+
+TabPainter::~TabPainter() {
+    delete data;
+}
+
+// Calculates tab's elements, based on its width and height.
+// Generates a GraphicsPath, which is used for painting the tab, etc.
+bool TabPainter::Reshape(int dx, int dy) {
+    dx--;
+    if (width == dx && height == dy) {
+        return false;
+    }
+    width = dx;
+    height = dy;
+
+    GraphicsPath shape;
+    // define tab's body
+    shape.AddRectangle(Gdiplus::Rect(0, 0, width, height));
+    shape.SetMarker();
+
+    // define "x"'s circle
+    int c = int((float)height * 0.78f + 0.5f); // size of bounding square for the circle
+    int maxC = DpiScale(hwnd, 17);
+    if (height > maxC) {
+        c = DpiScale(hwnd, 17);
+    }
+    Gdiplus::Point p(width - c - DpiScale(hwnd, 3), (height - c) / 2); // circle's position
+    shape.AddEllipse(p.X, p.Y, c, c);
+    shape.SetMarker();
+    // define "x"
+    int o = int((float)c * 0.286f + 0.5f); // "x"'s offset
+    shape.AddLine(p.X + o, p.Y + o, p.X + c - o, p.Y + c - o);
+    shape.StartFigure();
+    shape.AddLine(p.X + c - o, p.Y + o, p.X + o, p.Y + c - o);
+    shape.SetMarker();
+
+    delete data;
+    data = new PathData();
+    shape.GetPathData(data);
+    return true;
+}
+
+// Finds the index of the tab, which contains the given point.
+int TabPainter::IndexFromPoint(int x, int y, bool* inXbutton) {
+    Gdiplus::Point point(x, y);
+    Graphics gfx(hwnd);
+    GraphicsPath shapes(data->Points, data->Types, data->Count);
+    GraphicsPath shape;
+    Gdiplus::GraphicsPathIterator iterator(&shapes);
+    iterator.NextMarker(&shape);
+
+    Rect rClient = ClientRect(hwnd);
+    float yPosTab = inTitlebar ? 0.0f : float(rClient.dy - height - 1);
+    gfx.TranslateTransform(1.0f, yPosTab);
+    for (int i = 0; i < Count(); i++) {
+        Gdiplus::Point pt(point);
+        gfx.TransformPoints(Gdiplus::CoordinateSpaceWorld, Gdiplus::CoordinateSpaceDevice, &pt, 1);
+        if (shape.IsVisible(pt, &gfx)) {
+            iterator.NextMarker(&shape);
+            if (inXbutton) {
+                *inXbutton = shape.IsVisible(pt, &gfx) ? true : false;
+            }
+            return i;
+        }
+        gfx.TranslateTransform(float(width + 1), 0.0f);
+    }
+    if (inXbutton) {
+        *inXbutton = false;
+    }
+    return -1;
+}
+
+// Invalidates the tab's region in the client area.
+void TabPainter::Invalidate(int index) {
+    InvalidateRect(hwnd, nullptr, FALSE);
+#if 0
+    if (index < 0) {
+        return;
+    }
+
+    Graphics gfx(hwnd);
+    GraphicsPath shapes(data->Points, data->Types, data->Count);
+    GraphicsPath shape;
+    Gdiplus::GraphicsPathIterator iterator(&shapes);
+    iterator.NextMarker(&shape);
+    Region region(&shape);
+
+    Rect rClient = ClientRect(hwnd);
+    float yPosTab = inTitlebar ? 0.0f : float(rClient.dy - height - 1);
+    gfx.TranslateTransform(float((width + 1) * index) + 1.0f, yPosTab);
+    HRGN hRgn = region.GetHRGN(&gfx);
+    InvalidateRgn(hwnd, hRgn, FALSE);
+    DeleteObject(hRgn);
+#endif
+}
+
+// Paints the tabs that intersect the window's update rectangle.
+void TabPainter::Paint(HDC hdc, RECT& rc) {
+    IntersectClipRect(hdc, rc.left, rc.top, rc.right, rc.bottom);
+#if 0
+        // paint the background
+        bool isTranslucentMode = inTitlebar && dwm::IsCompositionEnabled();
+        if (isTranslucentMode) {
+            PaintParentBackground(hwnd, hdc);
+        } else {
+            // note: not sure what color should be used here and painting
+            // background works fine
+            /*HBRUSH brush = CreateSolidBrush(colors.bar);
+            FillRect(hdc, &rc, brush);
+            DeleteObject(brush);*/
+        }
+#else
+    PaintParentBackground(hwnd, hdc);
+#endif
+    // TODO: GDI+ doesn't seem to cope well with SetWorldTransform
+    XFORM ctm = {1.0, 0, 0, 1.0, 0, 0};
+    SetWorldTransform(hdc, &ctm);
+
+    COLORREF bgCol, textCol, xCol, circleCol;
+
+    Graphics gfx(hdc);
+    bgCol = GetAppColor(AppColor::TabBackgroundBg);
+    gfx.Clear(GdiRgbFromCOLORREF(bgCol));
+
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+    gfx.SetCompositingQuality(CompositingQualityHighQuality);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+    gfx.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    gfx.SetPageUnit(UnitPixel);
+    GraphicsPath shapes(data->Points, data->Types, data->Count);
+    GraphicsPath shape;
+    Gdiplus::GraphicsPathIterator iterator(&shapes);
+
+    SolidBrush br(Color(0, 0, 0));
+    Pen pen(&br, 2.0f);
+
+    Font f(hdc, tabsCtrl->hfont);
+    // TODO: adjust these constant values for DPI?
+    Gdiplus::RectF layout((float)DpiScale(hwnd, 3), 1.0f, float(width - DpiScale(hwnd, 20)), (float)height);
+    StringFormat sf(StringFormat::GenericDefault());
+    sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+    sf.SetLineAlignment(StringAlignmentCenter);
+    sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+    float yPosTab = inTitlebar ? 0.0f : float(ClientRect(hwnd).dy - height - 1);
+    int nTabs = Count();
+    logf("TabPainter::Paint: nTabs=%d\n", nTabs);
+    for (int i = 0; i < nTabs; i++) {
+        gfx.ResetTransform();
+        gfx.TranslateTransform(1.f + (float)(width + 1) * i - (float)rc.left, yPosTab - (float)rc.top);
+
+        if (!gfx.IsVisible(0, 0, width + 1, height + 1)) {
+            continue;
+        }
+
+        // Get the correct colors based on the state and the current theme
+        bgCol = GetAppColor(AppColor::TabBackgroundBg);
+        textCol = GetAppColor(AppColor::TabBackgroundText);
+        xCol = GetAppColor(AppColor::TabBackgroundCloseX);
+        circleCol = GetAppColor(AppColor::TabBackgroundCloseCircle);
+
+        int selectedTabIdx = SelectedTabIdx();
+        if (selectedTabIdx == i) {
+            bgCol = GetAppColor(AppColor::TabSelectedBg);
+            textCol = GetAppColor(AppColor::TabSelectedText);
+            xCol = GetAppColor(AppColor::TabSelectedCloseX);
+            circleCol = GetAppColor(AppColor::TabSelectedCloseCircle);
+        } else if (highlighted == i) {
+            bgCol = GetAppColor(AppColor::TabHighlightedBg);
+            textCol = GetAppColor(AppColor::TabHighlightedText);
+            xCol = GetAppColor(AppColor::TabHighlightedCloseX);
+            circleCol = GetAppColor(AppColor::TabHighlightedCloseCircle);
+        }
+        if (xHighlighted == i) {
+            xCol = GetAppColor(AppColor::TabHoveredCloseX);
+            circleCol = GetAppColor(AppColor::TabHoveredCloseCircle);
+        }
+        if (xClicked == i) {
+            xCol = GetAppColor(AppColor::TabClickedCloseX);
+            circleCol = GetAppColor(AppColor::TabClickedCloseCircle);
+        }
+
+        // paint tab's body
+        gfx.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        iterator.NextMarker(&shape);
+        br.SetColor(GdiRgbFromCOLORREF(bgCol));
+        Gdiplus::Point points[4];
+        shape.GetPathPoints(points, 4);
+        Gdiplus::Rect body(points[0].X, points[0].Y, points[2].X - points[0].X, points[2].Y - points[0].Y);
+        body.Inflate(0, 0);
+        gfx.SetClip(body);
+        body.Inflate(5, 5);
+        gfx.FillRectangle(&br, body);
+        gfx.ResetClip();
+
+        // draw tab's text
+        gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+        br.SetColor(GdiRgbFromCOLORREF(textCol));
+        WCHAR* text = tabsCtrl->GetTabText(i);
+        gfx.DrawString(text, -1, &f, layout, &sf, &br);
+
+        // paint "x"'s circle
+        iterator.NextMarker(&shape);
+        // bool closeCircleEnabled = true;
+        if ((xClicked == i || xHighlighted == i) /*&& closeCircleEnabled*/) {
+            br.SetColor(GdiRgbFromCOLORREF(circleCol));
+            gfx.FillPath(&br, &shape);
+        }
+
+        // paint "x"
+        iterator.NextMarker(&shape);
+        pen.SetColor(GdiRgbFromCOLORREF(xCol));
+        gfx.DrawPath(&pen, &shape);
+        iterator.Rewind();
+    }
+}
+
+int TabPainter::Count() {
+    int n = tabsCtrl->GetTabCount();
+    return n;
+}
+
+int TabPainter::SelectedTabIdx() {
+    int n = tabsCtrl->GetSelectedTabIndex();
+    return n;
+}
+
 Kind kindTabs = "tabs";
+
+static void SendNotification(TabsCtrl2* tabsCtrl, uint code, int tab1, int tab2) {
+    if (!tabsCtrl->onNotify) {
+        return;
+    }
+    TabNotifyInfo info;
+    info.nmhdr.hwndFrom = tabsCtrl->hwnd;
+    info.nmhdr.idFrom = tabsCtrl->ctrlID;
+    info.nmhdr.code = code;
+    info.tabIdx1 = tab1;
+    info.tabIdx2 = tab2;
+    WmNotifyEvent ev{};
+    ev.w = tabsCtrl;
+    ev.hwnd = GetParent(tabsCtrl->hwnd);
+    ev.msg = WM_NOTIFY;
+    ev.code = code;
+    ev.nmhdr = &info.nmhdr;
+    ev.lp = (LPARAM)&info;
+    tabsCtrl->onNotify(&ev);
+}
 
 TabsCtrl2::TabsCtrl2(HWND p) : WindowBase(p) {
     dwStyle = WS_CHILD | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_FIXEDWIDTH | TCS_FORCELABELLEFT | WS_VISIBLE;
@@ -515,6 +782,8 @@ bool TabsCtrl2::Create() {
     if (createToolTipsHwnd) {
         dwStyle |= TCS_TOOLTIPS;
     }
+    tabPainter = new TabPainter(this, tabSize);
+
     bool ok = WindowBase::Create();
     if (!ok) {
         return false;
@@ -548,6 +817,194 @@ void TabsCtrl2::WndProc(WndEvent* ev) {
 
     TabsCtrl2* w = this;
     CrashIf(w->hwnd != (HWND)hwnd);
+
+    PAINTSTRUCT ps;
+    HDC hdc;
+    int index;
+    LPTCITEM tcs;
+
+    TabPainter* tab = w->tabPainter;
+
+    switch (msg) {
+        case TCM_SETITEM:
+            // TODO: this should not be necessary
+            index = (int)wp;
+            tcs = (LPTCITEM)lp;
+            if (TCIF_TEXT & tcs->mask) {
+                tab->Invalidate(index);
+            }
+            break;
+
+        case TCM_DELETEITEM:
+            // TODO: this should not be necessary
+            tab->xClicked = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            UpdateWindow(hwnd);
+            break;
+
+        case TCM_SETITEMSIZE:
+            if (tab->Reshape(LOWORD(lp), HIWORD(lp))) {
+                tab->xClicked = -1;
+                if (tab->Count()) {
+                    InvalidateRgn(hwnd, nullptr, FALSE);
+                    UpdateWindow(hwnd);
+                }
+            }
+            break;
+
+        case WM_NCHITTEST: {
+            if (!tab->inTitlebar || hwnd == GetCapture()) {
+                ev->result = HTCLIENT;
+                ev->didHandle = true;
+                return;
+            }
+            POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            if (-1 != tab->IndexFromPoint(pt.x, pt.y)) {
+                ev->result = HTCLIENT;
+                ev->didHandle = true;
+                return;
+            }
+            ev->result = HTTRANSPARENT;
+            ev->didHandle = true;
+        }
+            return;
+
+        case WM_MOUSELEAVE:
+            PostMessageW(hwnd, WM_MOUSEMOVE, 0xFF, 0);
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
+
+        case WM_MOUSEMOVE: {
+            tab->mouseCoordinates = lp;
+
+            if (0xff != wp) {
+                TrackMouseLeave(hwnd);
+            }
+
+            bool inX = false;
+            int hl = wp == 0xFF ? -1 : tab->IndexFromPoint(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &inX);
+            if (tab->isDragging && hl == -1) {
+                // preserve the highlighted tab if it's dragged outside the tabs' area
+                hl = tab->highlighted;
+            }
+            if (tab->highlighted != hl) {
+                if (tab->isDragging) {
+                    // send notification if the highlighted tab is dragged over another
+                    int tabNo = tab->highlighted;
+                    SendNotification(w, T_DRAG, tabNo, hl);
+                }
+
+                tab->Invalidate(hl);
+                tab->Invalidate(tab->highlighted);
+                tab->highlighted = hl;
+            }
+            int xHl = inX && !tab->isDragging ? hl : -1;
+            if (tab->xHighlighted != xHl) {
+                tab->Invalidate(xHl);
+                tab->Invalidate(tab->xHighlighted);
+                tab->xHighlighted = xHl;
+            }
+            if (!inX) {
+                tab->xClicked = -1;
+            }
+        }
+            ev->didHandle = true;
+            return;
+
+        case WM_LBUTTONDOWN:
+            bool inX;
+            tab->nextTab = tab->IndexFromPoint(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &inX);
+            if (inX) {
+                // send request to close the tab
+                int next = tab->nextTab;
+                // if we have permission to close the tab
+                SendNotification(w, T_CLOSING, next, -1);
+                tab->Invalidate(tab->nextTab);
+                tab->xClicked = tab->nextTab;
+            } else if (tab->nextTab != -1) {
+                int selectedIdx = tab->SelectedTabIdx();
+                if (tab->nextTab != selectedIdx) {
+                    // send request to select tab
+                    w->SetSelectedTabByIndex(tab->nextTab);
+                }
+                tab->isDragging = true;
+                SetCapture(hwnd);
+            }
+            ev->didHandle = true;
+            return;
+
+        case WM_LBUTTONUP:
+            if (tab->xClicked != -1) {
+                // send notification that the tab is closed
+                int clicked = tab->xClicked;
+                SendNotification(w, T_CLOSE, clicked, -1);
+                tab->Invalidate(clicked);
+                tab->xClicked = -1;
+            }
+            if (tab->isDragging) {
+                tab->isDragging = false;
+                ReleaseCapture();
+            }
+            ev->didHandle = true;
+            return;
+
+        case WM_MBUTTONDOWN:
+            // middle-clicking unconditionally closes the tab
+            {
+                tab->nextTab = tab->IndexFromPoint(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                // send request to close the tab
+                int next = tab->nextTab;
+                SendNotification(w, T_CLOSING, next, -1);
+            }
+            ev->didHandle = true;
+            return;
+
+        case WM_MBUTTONUP:
+            if (tab->xClicked != -1) {
+                // send notification that the tab is closed
+                int clicked = tab->xClicked;
+                SendNotification(w, T_CLOSE, clicked, -1);
+                tab->Invalidate(clicked);
+                tab->xClicked = -1;
+            }
+            ev->didHandle = true;
+            return;
+
+        case WM_ERASEBKGND:
+            ev->result = TRUE;
+            ev->didHandle = true;
+            return;
+
+        case WM_PAINT: {
+            RECT rc;
+            GetUpdateRect(hwnd, &rc, FALSE);
+            // TODO: when is wp != nullptr?
+            hdc = wp ? (HDC)wp : BeginPaint(hwnd, &ps);
+
+            DoubleBuffer buffer(hwnd, Rect::FromRECT(rc));
+            tab->Paint(buffer.GetDC(), rc);
+            buffer.Flush(hdc);
+
+            ValidateRect(hwnd, nullptr);
+            if (!wp) {
+                EndPaint(hwnd, &ps);
+            }
+            ev->didHandle = true;
+            return;
+        }
+
+#if 0
+        case WM_SIZE: {
+            WindowInfo* win = FindWindowInfoByHwnd(hwnd);
+            if (win) {
+                UpdateTabWidth(win);
+            }
+        }
+            break;
+#endif
+    }
 }
 
 Size TabsCtrl2::GetIdealSize() {
@@ -579,6 +1036,11 @@ int TabsCtrl2::InsertTab(int idx, std::string_view sv) {
     auto s = ToWstrTemp(sv);
     item.pszText = s.Get();
     int insertedIdx = TabCtrl_InsertItem(hwnd, idx, &item);
+
+    tabPainter->xClicked = -1;
+    InvalidateRect(hwnd, nullptr, FALSE);
+    UpdateWindow(hwnd);
+
     return insertedIdx;
 }
 
@@ -591,6 +1053,13 @@ void TabsCtrl2::RemoveTab(int idx) {
 
 void TabsCtrl2::RemoveAllTabs() {
     TabCtrl_DeleteAllItems(hwnd);
+
+    TabPainter* tab = tabPainter;
+    tab->highlighted = -1;
+    tab->xClicked = -1;
+    tab->xHighlighted = -1;
+    InvalidateRect(hwnd, nullptr, FALSE);
+    UpdateWindow(hwnd);
 }
 
 // TODO: remove in favor of std::string_view version
@@ -632,16 +1101,27 @@ WCHAR* TabsCtrl2::GetTabText(int idx) {
 
 int TabsCtrl2::GetSelectedTabIndex() {
     int idx = TabCtrl_GetCurSel(hwnd);
+    logf("TabsCtrl2::GetSelectedTabIndex: idx=%d\n", idx);
     return idx;
 }
 
 int TabsCtrl2::SetSelectedTabByIndex(int idx) {
     int prevSelectedIdx = TabCtrl_SetCurSel(hwnd, idx);
+    logf("TabsCtrl2::SetSelectedTabByIndex: idx=%d, prev=%d\n", idx, prevSelectedIdx);
+
+    TabPainter* tab = tabPainter;
+    tab->Invalidate(idx);
+    tab->Invalidate(prevSelectedIdx);
+    UpdateWindow(hwnd);
+
     return prevSelectedIdx;
 }
 
-void TabsCtrl2::SetItemSize(Size sz) {
-    TabCtrl_SetItemSize(hwnd, sz.dx, sz.dy);
+void TabsCtrl2::SetTabSize(Size sz) {
+    tabSize = sz;
+    if (hwnd) {
+        TabCtrl_SetItemSize(hwnd, sz.dx, sz.dy);
+    }
 }
 
 void TabsCtrl2::SetToolTipsHwnd(HWND hwndTooltip) {
